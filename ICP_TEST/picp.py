@@ -93,7 +93,108 @@ class picp(object):
         T[:m, m] = t
         return T, R, t
 
+    def fasticp(self,normals,p,q,s,k,distances,indices):
+        m=p.shape[1]
+        P = np.zeros(Nx)
+        b = np.sum(normals * (s*(q - p)), axis=1)
+        sig=0
+        # A = np.block([[(normals[:, 2] * p[:, 1] - normals[:, 1] * p[:, 2]).reshape((-1,1)),
+        #                (normals[:, 0] * p[:, 2] - normals[:, 2] * p[:, 0]).reshape((-1,1)),
+        #                (normals[:, 1] * p[:, 0] - normals[:, 0] * p[:, 1]).reshape((-1,1)),
+        #                 normals]])
+        if k==0:
+            for i in range(0,Nx):
+                sig=sig+(1/(i+1))*sum(distances)
+            self.sigma2=sig/D
+        tempRMS=self.RMS
+        for i in range(0,Nx):
+            self.RMS=0
+            diff=p[i,:]-q[indices,:]
+            diff=np.linalg.norm(diff,ord=2)
+            pm=np.exp(-diff/(2*self.sigma2))
+            P[i]=pm
+            if k==0:
+                tempsig=((1/(i+1))*diff)/D
+                self.RMS=self.RMS+np.sqrt((1/(i+1))*diff)
+            else:
+                tempsig=(self.px[i]*diff)/D
+                self.RMS = self.RMS+np.sqrt((self.px[i]) * diff)
+        den = sum(P)
+        self.px = P / den
+        px=np.sqrt(self.px)
+        px=self.px.reshape((-1,1))
+        A = np.block([[np.cross(p, normals), normals]])
+        #A=A*px
+        # b=b.reshape((-1,1))
+        # b=b*px
+        # b=b.reshape(-1)
+        x = np.linalg.lstsq(A, b)[0]  # solve least square Ax = b
+        t = x[3:]
+        cx = np.cos(x[0])
+        sx = np.sin(x[0])
+        cy = np.cos(x[1])
+        sy = np.sin(x[1])
+        cz = np.cos(x[2])
+        sz = np.sin(x[2])
+        R = np.block([[cz * cy, -sz * cx + cz * sy * sx, sz * sx + cz * sy * cx],
+                      [sz * cy, cy * cx + sz * sy * sx, -cz * sx + sz * sy * cx],
+                      [-sy, cy * sx, cy * cx]])
+        T = np.identity(m + 1)
+        self.sigma2=np.sum(A*x,axis=1)-b
+        sig=np.sum(self.sigma2)
+        #self.sigma2=sig*sig
+       # print(self.sigma2)
+        T[:m, :m] = R
+        print(T.shape)
+        T[:m, m] = t
+        err = np.abs(self.RMS - tempRMS)
+        print(err)
+        if err < 0.0001:
+            return err,T,R,t
+        return err,T,R,t
 
+    #法向量
+    def pc_normals(self,p, k=4):
+        '''
+        :param p: point cloud m*3
+        :param k: Knn
+        :return: normals with ambiguous orientaion (PCA solution problem)
+        '''
+        knn = NearestNeighbors(n_neighbors=k + 1, algorithm='kd_tree').fit(p)
+        _, index = knn.kneighbors(p)
+
+        m = p.shape[0]
+        normals = np.zeros((m, 3))
+        for i in range(m):
+            nn = p[index[i, 1:]]  # exclude self in nn
+            c = np.cov(nn.T)
+            w, v = np.linalg.eig(c)
+            normals[i] = v[:, np.argmin(w)]
+        return normals
+
+    #重新采样
+    def normal_sampling(normals, nums):
+        '''
+        :param normals: point cloud normals m*3
+        :param nums: num of samples n
+        :return: index of samples
+        '''
+
+        # convert to angular space, [-pi, pi]
+        azimuth = np.arctan2(normals[:, 1], normals[:, 0])
+        altitude = np.arctan2(normals[:, 2], np.sqrt(normals[:, 0] ** 2 + normals[:, 1] ** 2))
+
+        # compute bins in 2d and combine
+        bins = 500
+        index1 = np.digitize(azimuth, np.linspace(-np.pi, np.pi, bins), right=True)
+        index2 = np.digitize(altitude, np.linspace(-np.pi, np.pi, bins), right=True)
+        index = index1 * bins + index2
+
+        # get unique and then uniform sampling
+        unique_index, origin_index = np.unique(index, return_index=True)
+        sample = np.random.choice(unique_index.shape[0], size=nums, replace=False)
+        sample_index = origin_index[sample]
+        return sample_index
 
     def updateParam(self,X,Y,indices,distances,k):
         P = np.zeros(Nx)
@@ -136,26 +237,26 @@ class picp(object):
         B=self.Y
 
         # # Add noise
-        B += np.random.randn(Ny, D) * 5
+        #B += np.random.randn(Ny, D) * 5
 
         src[:self.m, :] = np.copy(A.T)
         dst[:self.m, :] = np.copy(B.T)
-
+        normals = self.pc_normals(A,4)
         for k in range(100):
             #这里的indices表示对应的最近点的索引，distances表示的每个点对应点的最短距离
             distances, indices = self.nearest_neighbor(src[:self.m, :].T, dst[:self.m, :].T)
             self.R1=self.R
             self.t1=self.t
 
-            T, self.R,self.t = self.best_fit_transform(src[:self.m, :].T, dst[:self.m, indices].T,k)
+            #T, self.R,self.t = self.best_fit_transform(src[:self.m, :].T, dst[:self.m, indices].T,k)
             #T, self.R, self.t = self.best_fit_transform(src[:self.m, :].T, dst[:self.m, indices].T, k)
 
-            #error,T,self.R,self.t=self.fasticp(normals,src[:self.m, :].T, dst[:self.m, indices].T,self.s,k,distances,indices)
-            error=self.updateParam(src[:self.m, :].T, dst[:self.m, indices].T,indices,distances,k)
+            error,T,self.R,self.t=self.fasticp(normals,src[:self.m, :].T, dst[:self.m, indices].T,self.s,k,distances,indices)
+            #error=self.updateParam(src[:self.m, :].T, dst[:self.m, indices].T,indices,distances,k)
             src = np.dot(T, src)
             B = np.dot(B, self.R)
             callback(**{'iteration': k, 'error': error, 'X': A, 'Y': B})
-            if np.abs(error)<0.0001:
+            if np.abs(error)<0.001:
                 break
 def visualize(iteration, error,X, Y, ax):
     plt.cla()
